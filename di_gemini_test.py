@@ -52,15 +52,12 @@ with st.sidebar:
         st.session_state.chat = client.chats.create(model="gemini-3-flash-preview")
         st.rerun()
 
-# --- 5. THE DATABASE WATCHER ---
+# --- 5. THE DATABASE WATCHER (With Auto-Reconnect) ---
 def check_for_new_data():
     try:
         with engine.connect() as conn:
-            # Cleanup part names
             conn.execute(text("UPDATE delivery_instructions SET part_name = REGEXP_REPLACE(part_name, ' ,[0-9]+\\\\.[0-9]+', '')"))
             conn.commit()
-            
-            # Fetch data
             df = pd.read_sql("SELECT * FROM delivery_instructions", conn).drop_duplicates(subset=["di_no", "part_no"])
             
             current_rows = [tuple(row) for row in df.to_numpy()]
@@ -69,19 +66,31 @@ def check_for_new_data():
             if new_rows:
                 data_text = tabulate(new_rows, headers=df.columns, tablefmt='plain')
                 
-                # Use the chat session from session state
-                response = st.session_state.chat.send_message(
-                    f"SYSTEM ALERT: New data detected in MySQL:\n{data_text}\nPlease summarize these items."
-                )
+                # --- RE-CONNECT LOGIC START ---
+                try:
+                    # Try sending the message normally
+                    response = st.session_state.chat.send_message(
+                        f"SYSTEM ALERT: New data detected in MySQL:\n{data_text}\nPlease summarize these items."
+                    )
+                except RuntimeError as e:
+                    if "client has been closed" in str(e):
+                        # The line is dead! Let's dial again.
+                        st.session_state.client = get_genai_client(GEMINI_KEY)
+                        st.session_state.chat = st.session_state.client.chats.create(model="gemini-3-flash-preview")
+                        # Try one more time with the new connection
+                        response = st.session_state.chat.send_message(
+                            f"SYSTEM ALERT: New data detected (Reconnected):\n{data_text}\nPlease summarize these items."
+                        )
+                    else:
+                        raise e
+                # --- RE-CONNECT LOGIC END ---
                 
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
                 st.session_state.seen_rows.update(new_rows)
                 st.rerun() 
     except Exception as e:
-        st.sidebar.error(f"Sync Issue: {e}")
-
-# Run watcher
-check_for_new_data()
+        # We move this to a 'warning' so it doesn't look like a total crash
+        st.sidebar.warning(f"Syncing... (Waiting for AI: {e})")
 
 # --- 6. CHAT INTERFACE ---
 for msg in st.session_state.messages:
@@ -109,3 +118,4 @@ if prompt := st.chat_input("Ask about the warehouse..."):
             st.session_state.messages.append({"role": "assistant", "content": response.text})
         except Exception as e:
             st.error(f"AI Error: {e}. Try hitting 'Clear Chat History' in the sidebar.")
+

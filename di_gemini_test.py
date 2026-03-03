@@ -5,7 +5,7 @@ from tabulate import tabulate
 from google import genai
 from google.genai import types
 
-# --- 1. CLOUD SETUP (Secrets) ---
+# --- 1. SETUP ---
 DB_USER = st.secrets["DB_USER"]
 DB_PASSWORD = st.secrets["DB_PASSWORD"]
 DB_HOST = st.secrets["DB_HOST"]
@@ -13,46 +13,30 @@ DB_PORT = st.secrets["DB_PORT"]
 DB_NAME = st.secrets["DB_NAME"]
 GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
 
-# Database engine
 engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
 
 # --- 2. THE PERSISTENT CLIENT (The Fix) ---
-# This decorator keeps the connection to Google alive across reruns
 @st.cache_resource
-def get_genai_client(api_key):
-    return genai.Client(api_key=api_key)
+def get_client():
+    return genai.Client(api_key=GEMINI_KEY)
 
-# Get our persistent client
-client = get_genai_client(GEMINI_KEY)
-
-# --- 3. SESSION STATE (Memory Bank) ---
-if "chat" not in st.session_state:
-    st.session_state.chat = client.chats.create(model="gemini-3-flash-preview")
-
+# Initialize Session States
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
 if "seen_rows" not in st.session_state:
     st.session_state.seen_rows = set()
 
-# --- 4. UI LAYOUT ---
-st.set_page_config(page_title="Railway AI Station", page_icon="🤖", layout="wide")
+# Helper function to ensure we always have a live chat session
+def get_chat():
+    if "chat" not in st.session_state:
+        st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
+    return st.session_state.chat
+
+# --- 3. UI LAYOUT ---
+st.set_page_config(page_title="Railway Vibe Station", page_icon="🤖")
 st.title("🤖 Railway Vibe Station")
 
-with st.sidebar:
-    st.header("Controls")
-    uploaded_file = st.file_uploader("Attach DI Image/PDF", type=['pdf', 'png', 'jpg'])
-    
-    if st.button("🔄 Check for New Data"):
-        st.rerun()
-        
-    if st.button("🗑️ Clear Chat History"):
-        # Reset everything to fresh
-        st.session_state.messages = []
-        st.session_state.chat = client.chats.create(model="gemini-3-flash-preview")
-        st.rerun()
-
-# --- 5. THE DATABASE WATCHER (With Auto-Reconnect) ---
+# --- 4. THE DATABASE WATCHER (With Auto-Repair) ---
 def check_for_new_data():
     try:
         with engine.connect() as conn:
@@ -65,57 +49,40 @@ def check_for_new_data():
             
             if new_rows:
                 data_text = tabulate(new_rows, headers=df.columns, tablefmt='plain')
-                
-                # --- RE-CONNECT LOGIC START ---
+                chat = get_chat()
                 try:
-                    # Try sending the message normally
-                    response = st.session_state.chat.send_message(
-                        f"SYSTEM ALERT: New data detected in MySQL:\n{data_text}\nPlease summarize these items."
-                    )
-                except RuntimeError as e:
-                    if "client has been closed" in str(e):
-                        # The line is dead! Let's dial again.
-                        st.session_state.client = get_genai_client(GEMINI_KEY)
-                        st.session_state.chat = st.session_state.client.chats.create(model="gemini-3-flash-preview")
-                        # Try one more time with the new connection
-                        response = st.session_state.chat.send_message(
-                            f"SYSTEM ALERT: New data detected (Reconnected):\n{data_text}\nPlease summarize these items."
-                        )
-                    else:
-                        raise e
-                # --- RE-CONNECT LOGIC END ---
+                    response = chat.send_message(f"SYSTEM: New DI data found:\n{data_text}\nSummarize this.")
+                except Exception:
+                    # If it fails, force-reset the chat and try one last time
+                    st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
+                    response = st.session_state.chat.send_message(f"SYSTEM: (Reconnected) New DI data found:\n{data_text}\nSummarize this.")
                 
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
                 st.session_state.seen_rows.update(new_rows)
-                st.rerun() 
+                st.rerun()
     except Exception as e:
-        # We move this to a 'warning' so it doesn't look like a total crash
-        st.sidebar.warning(f"Syncing... (Waiting for AI: {e})")
+        st.sidebar.error(f"Sync Issue: {e}")
 
-# --- 6. CHAT INTERFACE ---
+check_for_new_data()
+
+# --- 5. CHAT INTERFACE ---
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# --- 7. USER INPUT ---
-if prompt := st.chat_input("Ask about the warehouse..."):
-    # Display user input
+if prompt := st.chat_input("Ask about the database..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Prepare message parts
-    content_payload = [prompt]
-    if uploaded_file:
-        file_bytes = uploaded_file.read()
-        content_payload.append(types.Part.from_bytes(data=file_bytes, mime_type=uploaded_file.type))
-
-    # Generate Response
     with st.chat_message("assistant"):
+        chat = get_chat()
         try:
-            response = st.session_state.chat.send_message(content_payload)
-            st.markdown(response.text)
-            st.session_state.messages.append({"role": "assistant", "content": response.text})
-        except Exception as e:
-            st.error(f"AI Error: {e}. Try hitting 'Clear Chat History' in the sidebar.")
-
+            response = chat.send_message(prompt)
+        except Exception:
+            # Auto-repair connection if it died during the chat
+            st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
+            response = st.session_state.chat.send_message(prompt)
+        
+        st.markdown(response.text)
+        st.session_state.messages.append({"role": "assistant", "content": response.text})

@@ -28,7 +28,7 @@ if "seen_rows" not in st.session_state:
 
 def get_chat():
     if "chat" not in st.session_state:
-        st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
+        st.session_state.chat = get_client().chats.create(model="gemini-2.5-flash-lite")
     return st.session_state.chat
 
 # --- 3. UI LAYOUT ---
@@ -111,3 +111,4 @@ if prompt := st.chat_input("Ask about the database..."):
             if "closed" in str(e).lower() or "400" in str(e):
                 st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
                 st.info("Connection reset. Please try sending your message again.")
+

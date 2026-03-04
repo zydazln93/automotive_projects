@@ -18,44 +18,35 @@ engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_P
 # --- 2. PERSISTENT CLIENT & CHAT ---
 @st.cache_resource
 def get_client():
-    # Caching the client prevents the "Client has been closed" error
     return genai.Client(api_key=GEMINI_KEY)
 
+# Session State Initialization
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "seen_rows" not in st.session_state:
     st.session_state.seen_rows = set()
 
-# Function to safely get or restart the chat session
 def get_chat():
     if "chat" not in st.session_state:
         st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
     return st.session_state.chat
 
-# --- 3. UI LAYOUT (Bringing back the Side Panel!) ---
+# --- 3. UI LAYOUT ---
 st.set_page_config(page_title="Railway Vibe Station", page_icon="🤖", layout="wide")
 st.title("🤖 Railway Vibe Station")
 
-# --- SIDEBAR START ---
 with st.sidebar:
     st.header("Controls & Files")
-    
-    # File Uploader
     uploaded_file = st.file_uploader("Attach DI Image/PDF", type=['pdf', 'png', 'jpg'])
     
     st.write("---")
-    
-    # Refresh Button
     if st.button("🔄 Check for New Data"):
         st.rerun()
         
-    # The "Clear Chat" Button you were missing!
     if st.button("🗑️ Clear Chat History"):
         st.session_state.messages = []
-        # Reset the chat session too so it starts fresh
         st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
         st.rerun()
-# --- SIDEBAR END ---
 
 # --- 4. THE DATABASE WATCHER ---
 def check_for_new_data():
@@ -73,19 +64,17 @@ def check_for_new_data():
                 chat = get_chat()
                 try:
                     response = chat.send_message(f"SYSTEM: New DI data found:\n{data_text}\nSummarize this.")
-                except Exception:
-                    # Auto-Reconnect if the client closed
+                except Exception as e:
+                    # Force reconnect on any AI failure during background sync
                     st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
-                    response = st.session_state.chat.send_message(f"SYSTEM: (Reconnected) New DI data found:\n{data_text}\nSummarize this.")
+                    response = st.session_state.chat.send_message(f"SYSTEM: (Reconnected) New data:\n{data_text}")
                 
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
                 st.session_state.seen_rows.update(new_rows)
                 st.rerun()
     except Exception as e:
-        # Show sync errors in the sidebar so they don't break the main chat
         st.sidebar.error(f"Sync Issue: {e}")
 
-# Run the watcher
 check_for_new_data()
 
 # --- 5. CHAT INTERFACE ---
@@ -101,17 +90,24 @@ if prompt := st.chat_input("Ask about the database..."):
     with st.chat_message("assistant"):
         chat = get_chat()
         
-        # Prepare content (Text + File)
+        # Prepare content safely
         content_payload = [prompt]
         if uploaded_file:
-            content_payload.append(types.Part.from_bytes(data=uploaded_file.read(), mime_type=uploaded_file.type))
-            
+            try:
+                # Re-reading bytes only when needed to save memory
+                file_bytes = uploaded_file.getvalue()
+                content_payload.append(types.Part.from_bytes(data=file_bytes, mime_type=uploaded_file.type))
+            except Exception as fe:
+                st.error(f"File Error: {fe}")
+
         try:
             response = chat.send_message(content_payload)
-        except Exception:
-            # Re-initialize if connection dropped
-            st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
-            response = st.session_state.chat.send_message(content_payload)
-        
-        st.markdown(response.text)
-        st.session_state.messages.append({"role": "assistant", "content": response.text})
+            st.markdown(response.text)
+            st.session_state.messages.append({"role": "assistant", "content": response.text})
+        except Exception as e:
+            # THIS IS THE FIX: Reveal the hidden error message
+            st.error(f"⚠️ AI Client Error: {e}")
+            # If it's a connection issue, offer a reset
+            if "closed" in str(e).lower() or "400" in str(e):
+                st.session_state.chat = get_client().chats.create(model="gemini-3-flash-preview")
+                st.info("Connection reset. Please try sending your message again.")

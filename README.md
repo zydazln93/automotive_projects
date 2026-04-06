@@ -8,6 +8,8 @@
 
 This script automates the extraction of **Delivery Instruction (DI) data from PDF files** and stores the parsed records into a **MySQL database hosted on Railway**. It handles duplicate detection at both the DI and part level, ensuring clean, non-redundant data insertion.
 
+Please note that this project utilizes AI assistant mostly on Tabula to extract texts on PDF files, data cleaning, converting into Pandas DataFrame, and lastly, store these texts into MySQL via Railway.
+
 ---
 
 ## ⚙️ Configuration & Dependencies
